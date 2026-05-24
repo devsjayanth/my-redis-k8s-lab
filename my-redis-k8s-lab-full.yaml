@@ -1,0 +1,456 @@
+# =============================================================================
+# NAMESPACES
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-infra-space
+  labels:
+    project: my-redis-k8s-lab
+    tier: infrastructure
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+    tier: database
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+    tier: application
+---
+# =============================================================================
+# DATA TIER: PERSISTENT VOLUME
+# Must exist before StatefulSet so PVC binding can occur immediately.
+# Bound to workernode2 via nodeAffinity; update hostname if different.
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: redis-local-pv
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  capacity:
+    storage: 5Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-redis
+  local:
+    path: /mnt/redis-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - workernode2
+---
+# =============================================================================
+# DATA TIER: CONFIGMAP
+# Redis configuration externalized from container image.
+# Mounted as /etc/redis/redis.conf inside the pod.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+data:
+  redis.conf: |
+    bind 0.0.0.0
+    protected-mode yes
+    port 6379
+    appendonly yes
+    appendfilename "appendonly.aof"
+    save 900 1
+    save 300 10
+    save 60 10000
+    maxmemory-policy allkeys-lru
+    tcp-backlog 511
+    timeout 0
+    tcp-keepalive 300
+---
+# =============================================================================
+# DATA TIER: SECRET
+# Redis credentials. stringData is base64-encoded automatically by Kubernetes.
+# This secret must be synced to my-app-space separately (see below).
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-credentials
+  namespace: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+type: Opaque
+stringData:
+  password: "SuperSecretRedis2026!"
+  username: "default"
+---
+# =============================================================================
+# DATA TIER: NETWORK POLICIES
+# Default deny establishes zero-trust baseline. Explicit allow rule
+# permits only RedisInsight pods from my-app-space on port 6379.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-tier-to-redis
+  namespace: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              tier: application
+          podSelector:
+            matchLabels:
+              app: redisinsight-ui
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+# =============================================================================
+# DATA TIER: SERVICES
+# Headless service enables per-pod DNS for StatefulSet.
+# ClusterIP service provides load-balanced endpoint for clients.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-db-headless
+  namespace: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  clusterIP: None
+  selector:
+    app: redis-db
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-db
+  namespace: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  type: ClusterIP
+  selector:
+    app: redis-db
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+# =============================================================================
+# DATA TIER: STATEFULSET
+# Stable pod identity, ordered lifecycle, per-pod PVC via volumeClaimTemplates.
+# Tolerations allow scheduling on tainted workernode2.
+# Node affinity pins pod to same node as local PV.
+# Security context enforces non-root execution matching Redis Alpine UID 999.
+# =============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-db
+  namespace: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  serviceName: redis-db-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-db
+  template:
+    metadata:
+      labels:
+        app: redis-db
+        project: my-redis-k8s-lab
+    spec:
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsNonRoot: true
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "redis-db"
+          effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - workernode2
+      containers:
+        - name: redis-db
+          image: redis:7-alpine
+          command: ["redis-server"]
+          args: ["/etc/redis/redis.conf", "--requirepass", "$(REDIS_PASSWORD)"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: password
+          ports:
+            - containerPort: 6379
+              name: redis
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+            - name: redis-config
+              mountPath: /etc/redis
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-redis
+        resources:
+          requests:
+            storage: 5Gi
+---
+# =============================================================================
+# APP TIER: CONFIGMAP
+# Non-sensitive RedisInsight configuration sourced via env valueFrom.
+# Cross-namespace FQDN resolves Redis service in my-data-space.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redisinsight-config
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+data:
+  RI_REDIS_NAME: "K8s Redis Lab"
+  RI_REDIS_PORT: "6379"
+  RI_REDIS_HOST: "redis-db.my-data-space.svc.cluster.local"
+---
+# =============================================================================
+# APP TIER: SERVICE ACCOUNT + RBAC
+# Dedicated SA avoids default SA over-permissioning.
+# Role grants read-only access to pods/services/endpoints in my-app-space only.
+# RoleBinding associates the Role with the SA.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: redisinsight-sa
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: redisinsight-reader
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: redisinsight-reader-binding
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+subjects:
+  - kind: ServiceAccount
+    name: redisinsight-sa
+roleRef:
+  kind: Role
+  name: redisinsight-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+# =============================================================================
+# APP TIER: NETWORK POLICIES
+# Default deny + explicit allow for ingress controller namespace.
+# Adjust namespaceSelector label if your ingress controller namespace differs.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-insight
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  podSelector:
+    matchLabels:
+      app: redisinsight-ui
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: nginx-ingress
+      ports:
+        - protocol: TCP
+          port: 5540
+---
+# =============================================================================
+# APP TIER: SERVICE
+# Exposes RedisInsight internally on port 80, forwarding to container 5540.
+# Targeted by Ingress backend for external routing.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redisinsight-ui
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  type: ClusterIP
+  selector:
+    app: redisinsight-ui
+  ports:
+    - port: 80
+      targetPort: 5540
+---
+# =============================================================================
+# APP TIER: DEPLOYMENT
+# Stateless RedisInsight managed via ReplicaSets.
+# Config sourced from ConfigMap, credentials from duplicated Secret.
+# ServiceAccount bound for least-privilege RBAC enforcement.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redisinsight-ui
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: redisinsight-ui
+  template:
+    metadata:
+      labels:
+        app: redisinsight-ui
+        project: my-redis-k8s-lab
+    spec:
+      serviceAccountName: redisinsight-sa
+      containers:
+        - name: redisinsight-ui
+          image: redis/redisinsight:latest
+          ports:
+            - containerPort: 5540
+          env:
+            - name: RI_REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: redisinsight-config
+                  key: RI_REDIS_HOST
+            - name: RI_REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: redisinsight-config
+                  key: RI_REDIS_PORT
+            - name: RI_REDIS_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: redisinsight-config
+                  key: RI_REDIS_NAME
+            - name: RI_REDIS_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: username
+            - name: RI_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: password
+---
+# =============================================================================
+# INFRA TIER: INGRESS
+# Layer 7 routing for myredislab.dev via NGINX controller at 10.0.0.200.
+# Backend references cross-namespace service FQDN.
+# If F5 NGINX rejects cross-namespace backends, move this resource to
+# my-app-space and change backend name to "redisinsight-ui".
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: redisinsight-ui-ingress
+  namespace: my-infra-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: myredislab.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: redisinsight-ui.my-app-space.svc.cluster.local
+                port:
+                  number: 80

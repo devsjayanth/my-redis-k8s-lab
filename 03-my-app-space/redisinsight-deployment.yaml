@@ -1,0 +1,55 @@
+# Deployment manages stateless RedisInsight replicas. ReplicaSets
+# are created implicitly to maintain the desired replica count
+# and handle rolling updates during image changes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redisinsight-ui
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: redisinsight-ui
+  template:
+    metadata:
+      labels:
+        app: redisinsight-ui
+        project: my-redis-k8s-lab
+    spec:
+      serviceAccountName: redisinsight-sa
+      containers:
+      - name: redisinsight-ui
+        image: redis/redisinsight:latest
+        ports:
+        - containerPort: 5540
+        env:
+        # Non-sensitive config sourced from ConfigMap.
+        - name: RI_REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: redisinsight-config
+              key: RI_REDIS_HOST
+        - name: RI_REDIS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: redisinsight-config
+              key: RI_REDIS_PORT
+        - name: RI_REDIS_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: redisinsight-config
+              key: RI_REDIS_NAME
+        # Sensitive credentials sourced from Secret.
+        - name: RI_REDIS_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: redis-credentials
+              key: username
+        - name: RI_REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-credentials
+              key: password

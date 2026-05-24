@@ -1,0 +1,31 @@
+# Infrastructure namespace for ingress controllers and external-facing routing.
+# Isolates network entry points from application and data workloads.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-infra-space
+  labels:
+    project: my-redis-k8s-lab
+    tier: infrastructure
+---
+# Data namespace for stateful workloads and persistent storage.
+# Enforces strict network isolation; only explicitly allowed
+# cross-namespace traffic can reach database pods.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+    tier: database
+---
+# Application namespace for stateless frontends and UI tools.
+# Separated from data tier to limit blast radius of compromises
+# and to apply independent RBAC and network policies.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+    tier: application

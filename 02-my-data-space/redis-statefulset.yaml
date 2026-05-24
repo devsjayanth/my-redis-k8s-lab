@@ -1,0 +1,80 @@
+# StatefulSet manages Redis with stable pod identity and ordered
+# lifecycle. Each replica gets a unique ordinal index and a
+# dedicated PVC from the volumeClaimTemplate below.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-db
+  namespace: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  serviceName: redis-db-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-db
+  template:
+    metadata:
+      labels:
+        app: redis-db
+        project: my-redis-k8s-lab
+    spec:
+      # Run container as non-root UID 999 matching Redis Alpine defaults.
+      # fsGroup ensures mounted volumes have correct group ownership.
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsNonRoot: true
+      # Toleration permits scheduling on workernode2 which carries
+      # the taint dedicated=redis-db:NoSchedule. Without this,
+      # the scheduler rejects the node entirely.
+      tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "redis-db"
+        effect: "NoSchedule"
+      # Hard node affinity pins the pod to workernode2. Must match
+      # the local PV nodeAffinity or the pod stays Pending forever
+      # because no other node satisfies both constraints.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - workernode2
+      containers:
+      - name: redis-db
+        image: redis:7-alpine
+        command: ["redis-server"]
+        args: ["/etc/redis/redis.conf", "--requirepass", "$(REDIS_PASSWORD)"]
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-credentials
+              key: password
+        ports:
+        - containerPort: 6379
+          name: redis
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        - name: redis-config
+          mountPath: /etc/redis
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-config
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: local-redis
+      resources:
+        requests:
+          storage: 5Gi

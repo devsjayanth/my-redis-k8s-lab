@@ -1,0 +1,28 @@
+# PersistentVolume bound to a specific filesystem path on workernode2.
+# Local PVs require nodeAffinity to ensure pods schedule only on the
+# node holding the physical data. Reclaim policy Retain prevents
+# accidental data loss when the PVC is deleted.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: redis-local-pv
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  capacity:
+    storage: 5Gi
+  volumeMode: Filesystem
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-redis
+  local:
+    path: /mnt/redis-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - workernode2

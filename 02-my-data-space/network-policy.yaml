@@ -1,0 +1,40 @@
+# Default deny all ingress in the data namespace. No pod can receive
+# traffic unless an explicit allow rule exists below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# Allow only RedisInsight pods from my-app-space to reach Redis.
+# namespaceSelector and podSelector are ANDed: the source pod must
+# reside in a namespace labeled tier=application AND carry the
+# label app=redisinsight-ui. All other sources are denied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-tier-to-redis
+  namespace: my-data-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-db
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          tier: application
+      podSelector:
+        matchLabels:
+          app: redisinsight-ui
+    ports:
+    - protocol: TCP
+      port: 6379

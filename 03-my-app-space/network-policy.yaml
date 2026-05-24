@@ -1,0 +1,35 @@
+# Default deny all ingress in the application namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# Allow the NGINX ingress controller to reach RedisInsight.
+# Adjust the namespaceSelector label to match your actual
+# ingress controller namespace if it differs from nginx-ingress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-insight
+  namespace: my-app-space
+  labels:
+    project: my-redis-k8s-lab
+spec:
+  podSelector:
+    matchLabels:
+      app: redisinsight-ui
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: nginx-ingress
+    ports:
+    - protocol: TCP
+      port: 5540
